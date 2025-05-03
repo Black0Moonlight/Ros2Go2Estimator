@@ -1,142 +1,128 @@
-#include <rclcpp/rclcpp.hpp>
 #include <memory>
 #include <iostream>
 #include <filesystem>
-#include <urdf_parser/urdf_parser.h>
-#include <rcl_interfaces/msg/parameter_event.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <tf2/LinearMath/Quaternion.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#include <tf2_ros/transform_broadcaster.h>
-#include <sensor_msgs/msg/imu.hpp>
+#include <nav_msgs/Odometry.h>
+#include <tf/transform_broadcaster.h>
+#include <sensor_msgs/Imu.h>
+#include <tf/transform_datatypes.h>
+#include <urdf/model.h>
+#include <unitree_legged_msgs/LowState.h>
+#include <std_msgs/Bool.h>
 
-#include "unitree/robot/channel/channel_subscriber.hpp"
-#include "unitree/idl/go2/LowState_.hpp"
+#include <ros/ros.h>
 
-#include "fusion_estimator/msg/fusion_estimator_test.hpp" 
-#include "GO2FusionEstimator/Estimator/EstimatorPortN.h"
-#include "GO2FusionEstimator/Sensor_Legs.h" 
-#include "GO2FusionEstimator/Sensor_IMU.h" 
+#include "fusion_estimator/FusionEstimatorTest.h" 
+#include "GO1FusionEstimator/Estimator/EstimatorPortN.h"
+#include "GO1FusionEstimator/Sensor_Legs.h" 
+#include "GO1FusionEstimator/Sensor_IMU.h" 
 
 using namespace DataFusion;
 
-class FusionEstimatorNode : public rclcpp::Node
+class FusionEstimatorNode
 {
 public:
     FusionEstimatorNode() 
-    : Node("fusion_estimator_node")
     {
-        // 通过参数获取网络接口名称，设置默认值为 "enxc8a3627ff10b" 或其他有效接口
-        this->declare_parameter<std::string>("network_interface", "enxc8a3627ff10b");
-        std::string network_interface = this->get_parameter("network_interface").as_string();
+        // Initialize ROS1 node handle
+        ros::NodeHandle nh;
+        
+        // Initialize publishers and subscribers
+        lowstate_subscriber = nh.subscribe("/go1/lowstate", 10, 
+                                           &FusionEstimatorNode::LowStateCallback, this);
+        // Reset subscriber
+        reset_subscriber = nh.subscribe<std_msgs::Bool>("/smxfe/reset_pose", 1, &FusionEstimatorNode::ResetCallback, this);
 
-        // 初始化Unitree通道工厂
-        unitree::robot::ChannelFactory::Instance()->Init(0, network_interface);
-
-        // 初始化消息接收与发布
-        Lowstate_subscriber.reset(
-            new unitree::robot::ChannelSubscriber<unitree_go::msg::dds_::LowState_>("rt/lowstate"));
-        Lowstate_subscriber->InitChannel(
-            std::bind(&FusionEstimatorNode::LowStateCallback, this, std::placeholders::_1), 1);
-
-        FETest_publisher = this->create_publisher<fusion_estimator::msg::FusionEstimatorTest>(
-            "SMXFE/Estimation", 10);
-
-        SMXFE_publisher = this->create_publisher<nav_msgs::msg::Odometry>("SMXFE/Odom", 10);
-        TF_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(this);
-        SMX_IMU_publisher = this->create_publisher<sensor_msgs::msg::Imu>("SMXFE/Imu", 10);
+        fe_test_publisher = nh.advertise<fusion_estimator::FusionEstimatorTest>("SMXFE/Estimation", 10);
+        smxfe_publisher = nh.advertise<nav_msgs::Odometry>("SMXFE/Odom", 10);
+        smx_imu_publisher = nh.advertise<sensor_msgs::Imu>("SMXFE/Imu", 10);
+        
+        // Initialize TF broadcaster
+        tf_broadcaster = std::make_shared<tf::TransformBroadcaster>();
 
         for(int i = 0; i < 2; i++)
         {
-            EstimatorPortN* StateSpaceModel1_SensorsPtrs = new EstimatorPortN; // 创建新的结构体实例
-            StateSpaceModel1_Initialization(StateSpaceModel1_SensorsPtrs);     // 调用初始化函数
-            StateSpaceModel1_Sensors.push_back(StateSpaceModel1_SensorsPtrs);  // 将指针添加到容器中
+            EstimatorPortN* StateSpaceModel1_SensorsPtrs = new EstimatorPortN; // Create new structure instance
+            StateSpaceModel1_Initialization(StateSpaceModel1_SensorsPtrs);     // Call initialization function
+            StateSpaceModel1_Sensors.push_back(StateSpaceModel1_SensorsPtrs);  // Add pointer to container
         }
 
         Sensor_IMUAcc = std::make_shared<DataFusion::SensorIMUAcc>(StateSpaceModel1_Sensors[0]);
         Sensor_IMUMagGyro = std::make_shared<DataFusion::SensorIMUMagGyro>(StateSpaceModel1_Sensors[1]);
         Sensor_Legs = std::make_shared<DataFusion::SensorLegs>(StateSpaceModel1_Sensors[0]);
 
-        this->declare_parameter<double>("Modify_Par_1", 0.0);
-        this->declare_parameter<double>("Modify_Par_2", 0.0);
-        this->declare_parameter<double>("Modify_Par_3", 0.0);
-        ParameterCorrectCallback = this->add_on_set_parameters_callback(
-            std::bind(&FusionEstimatorNode::Modify_Par_Fun, this, std::placeholders::_1)
-          );
-
-        RCLCPP_INFO(this->get_logger(), "Fusion Estimator Node Initialized");
+        // Set parameters with ROS1 parameter server
+        nh.param<double>("Modify_Par_1", modify_par_1, 0.0);
+        nh.param<double>("Modify_Par_2", modify_par_2, 0.0);
+        nh.param<double>("Modify_Par_3", modify_par_3, 0.0);
+        
+        // Apply initial parameters
+        UpdateSensorCalibration();
+        
+        ROS_INFO("Fusion Estimator Node Initialized");
     }
 
-    // 传感器状态空间模型创建
-    std::vector<EstimatorPortN*> StateSpaceModel1_Sensors = {};// 容器声明
-    std::vector<EstimatorPortN*> StateSpaceModel2_Sensors = {};// 容器声明
+    // Sensor state space model creation
+    std::vector<EstimatorPortN*> StateSpaceModel1_Sensors = {}; // Container declaration
+    std::vector<EstimatorPortN*> StateSpaceModel2_Sensors = {}; // Container declaration
 
     void ObtainParameter();
+    // void UpdateSensorCalibration();
+    void spin() {
+        ros::spin();
+    }
 
 private:
+    ros::Publisher fe_test_publisher;
+    ros::Publisher smxfe_publisher;
+    ros::Publisher smx_imu_publisher;
+    ros::Subscriber lowstate_subscriber;
+    ros::Subscriber reset_subscriber;
 
-    rclcpp::Publisher<fusion_estimator::msg::FusionEstimatorTest>::SharedPtr FETest_publisher;
-    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr SMXFE_publisher;
-    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr SMX_IMU_publisher;
-    unitree::robot::ChannelSubscriberPtr<unitree_go::msg::dds_::LowState_> Lowstate_subscriber;
     std::shared_ptr<DataFusion::SensorIMUAcc> Sensor_IMUAcc; 
     std::shared_ptr<DataFusion::SensorIMUMagGyro> Sensor_IMUMagGyro; 
     std::shared_ptr<DataFusion::SensorLegs> Sensor_Legs; 
-    std::shared_ptr<tf2_ros::TransformBroadcaster> TF_broadcaster;
+    std::shared_ptr<tf::TransformBroadcaster> tf_broadcaster;
+    
+    // ROS Parameters
+    double modify_par_1;
+    double modify_par_2;
+    double modify_par_3;
 
-    rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr ParameterCorrectCallback;
-    rcl_interfaces::msg::SetParametersResult Modify_Par_Fun(
-    const std::vector<rclcpp::Parameter> & parameters)
+    void UpdateSensorCalibration()
     {
-        rcl_interfaces::msg::SetParametersResult result;
-        result.successful = true;
-        result.reason = "Sensor_IMUMagGyro->SensorQuaternion is corrected.";
         double AngleCorrect[3] = {0};
+        AngleCorrect[0] = modify_par_1 * M_PI / 180.0;
+        AngleCorrect[1] = modify_par_2 * M_PI / 180.0;
+        AngleCorrect[2] = modify_par_3 * M_PI / 180.0;
 
-        for (const auto & param : parameters)
-        {
-            if (param.get_name() == "Modify_Par_1")
-                AngleCorrect[0] = param.as_double() * M_PI / 180.0;
-            if (param.get_name() == "Modify_Par_2")
-                AngleCorrect[1] = param.as_double() * M_PI / 180.0;
-            if (param.get_name() == "Modify_Par_3")
-                AngleCorrect[2] = param.as_double() * M_PI / 180.0;
-        }
-
-        Eigen::AngleAxisd rollAngle(AngleCorrect[2], Eigen::Vector3d::UnitZ());  // 绕 X 轴旋转
-        Eigen::AngleAxisd pitchAngle(AngleCorrect[1], Eigen::Vector3d::UnitY()); // 绕 Y 轴旋转
-        Eigen::AngleAxisd yawAngle(AngleCorrect[0], Eigen::Vector3d::UnitX());   // 绕 Z 轴旋转
+        Eigen::AngleAxisd rollAngle(AngleCorrect[2], Eigen::Vector3d::UnitZ());  // Rotate around X axis
+        Eigen::AngleAxisd pitchAngle(AngleCorrect[1], Eigen::Vector3d::UnitY()); // Rotate around Y axis
+        Eigen::AngleAxisd yawAngle(AngleCorrect[0], Eigen::Vector3d::UnitX());   // Rotate around Z axis
 
         Sensor_IMUMagGyro->SensorQuaternion = yawAngle * pitchAngle * rollAngle;
         Sensor_IMUMagGyro->SensorQuaternionInv = Sensor_IMUMagGyro->SensorQuaternion.inverse();
-        std::cout <<"Sensor_IMUMagGyro->SensorQuaternion: " << Sensor_IMUMagGyro->SensorQuaternion.coeffs().transpose() << std::endl;
-
-        return result;
+        std::cout << "Sensor_IMUMagGyro->SensorQuaternion: " << Sensor_IMUMagGyro->SensorQuaternion.coeffs().transpose() << std::endl;
     }
 
-    void LowStateCallback(const void* message)
+    void LowStateCallback(const unitree_legged_msgs::LowState::ConstPtr& low_state)
     {
-        // 接收LowState数据
-        const auto& low_state = *(unitree_go::msg::dds_::LowState_*)message;
-
-        // 创建自定义消息对象
-        auto fusion_msg = fusion_estimator::msg::FusionEstimatorTest();
+        // Create custom message object
+        fusion_estimator::FusionEstimatorTest fusion_msg;
         
-        fusion_msg.stamp = this->get_clock()->now();
-
+        fusion_msg.stamp = ros::Time::now();
 
         for(int i=0; i<3; i++){
-            fusion_msg.data_check_a[0+i] = low_state.imu_state().accelerometer()[i];
-            fusion_msg.data_check_a[3+i] = low_state.imu_state().rpy()[i];
-            fusion_msg.data_check_a[6+i] = low_state.imu_state().gyroscope()[i];
+            fusion_msg.data_check_a[0+i] = low_state->imu.accelerometer[i];
+            fusion_msg.data_check_a[3+i] = low_state->imu.rpy[i];
+            fusion_msg.data_check_a[6+i] = low_state->imu.gyroscope[i];
         }
 
         for(int LegNumber = 0; LegNumber<4; LegNumber++)
         {
             for(int i = 0; i < 3; i++)
             {
-                fusion_msg.data_check_b[LegNumber*3+i] = low_state.motor_state()[LegNumber*3+i].q();
-                fusion_msg.data_check_c[LegNumber*3+i] = low_state.motor_state()[LegNumber*3+i].dq();
+                fusion_msg.data_check_b[LegNumber*3+i] = low_state->motorState[LegNumber*3+i].q;
+                fusion_msg.data_check_c[LegNumber*3+i] = low_state->motorState[LegNumber*3+i].dq;
             }
         }
 
@@ -144,13 +130,12 @@ private:
         double LatestMessage[3][100]={0};
         static double LastMessage[3][100]={0};
 
-        rclcpp::Clock ros_clock(RCL_SYSTEM_TIME);
-        rclcpp::Time CurrentTime = ros_clock.now();
-        double CurrentTimestamp =  CurrentTime.seconds();
+        ros::Time CurrentTime = ros::Time::now();
+        double CurrentTimestamp = CurrentTime.toSec();
 
         for(int i = 0; i < 3; i++)
         {
-            LatestMessage[0][3*i+2] = low_state.imu_state().accelerometer()[i];
+            LatestMessage[0][3*i+2] = low_state->imu.accelerometer[i];
         }
         for(int i = 0; i < 9; i++)
         {
@@ -170,11 +155,11 @@ private:
 
         for(int i = 0; i < 3; i++)
         {
-            LatestMessage[1][3*i] = low_state.imu_state().rpy()[i];
+            LatestMessage[1][3*i] = low_state->imu.rpy[i];
         }
         for(int i = 0; i < 3; i++)
         {
-            LatestMessage[1][3*i+1] = low_state.imu_state().gyroscope()[i];
+            LatestMessage[1][3*i+1] = low_state->imu.gyroscope[i];
         }
         for(int i = 0; i < 9; i++)
         {
@@ -196,11 +181,11 @@ private:
         {
             for(int i = 0; i < 3; i++)
             {
-                LatestMessage[2][LegNumber*3+i] = low_state.motor_state()[LegNumber*3+i].q();
-                LatestMessage[2][12+ LegNumber*3+i] = low_state.motor_state()[LegNumber*3+i].dq();
+                LatestMessage[2][LegNumber*3+i] = low_state->motorState[LegNumber*3+i].q;
+                LatestMessage[2][12+ LegNumber*3+i] = low_state->motorState[LegNumber*3+i].dq;
             }
-            LatestMessage[2][24 + LegNumber] = low_state.foot_force()[LegNumber];
-            fusion_msg.others[LegNumber] = low_state.foot_force()[LegNumber];
+            LatestMessage[2][24 + LegNumber] = low_state->footForce[LegNumber];
+            fusion_msg.others[LegNumber] = low_state->footForce[LegNumber];
             fusion_msg.others[LegNumber] = fusion_msg.others[LegNumber];
         }
         for(int i = 0; i < 28; i++)
@@ -224,134 +209,177 @@ private:
             }
         }
 
-        FETest_publisher->publish(fusion_msg);
+        fe_test_publisher.publish(fusion_msg);
 
-        // 新增：构造标准 odometry 消息，并发布
-        nav_msgs::msg::Odometry SMXFE_odom;
+        // Create standard odometry message and publish
+        nav_msgs::Odometry SMXFE_odom;
         SMXFE_odom.header.stamp = fusion_msg.stamp;
-        SMXFE_odom.header.frame_id = "odom";
-        SMXFE_odom.child_frame_id = "base_link";
+        SMXFE_odom.header.frame_id = "base"; // "odom"
+        SMXFE_odom.child_frame_id = "trunk";  //"base_link"
 
-        // 使用 fusion_msg.estimated_xyz 的前 3 个元素作为位置
+        // Use the first 3 elements of fusion_msg.estimated_xyz as position
         SMXFE_odom.pose.pose.position.x = fusion_msg.estimated_xyz[0];
         SMXFE_odom.pose.pose.position.y = fusion_msg.estimated_xyz[3];
         SMXFE_odom.pose.pose.position.z = fusion_msg.estimated_xyz[6];
 
-        // 使用 fusion_msg.estimated_rpy 的前 3 个元素（roll, pitch, yaw）转换为四元数
-        tf2::Quaternion q;
+        // Convert roll, pitch, yaw to quaternion
+        tf::Quaternion q;
         q.setRPY(fusion_msg.estimated_rpy[0], fusion_msg.estimated_rpy[3], fusion_msg.estimated_rpy[6]);
-        SMXFE_odom.pose.pose.orientation = tf2::toMsg(q);
-        // 发布 odometry 消息
-        SMXFE_publisher->publish(SMXFE_odom);
+        
+        // Convert to geometry_msgs::Quaternion
+        SMXFE_odom.pose.pose.orientation.x = q.x();
+        SMXFE_odom.pose.pose.orientation.y = q.y();
+        SMXFE_odom.pose.pose.orientation.z = q.z();
+        SMXFE_odom.pose.pose.orientation.w = q.w();
+        
+        // Publish odometry message
+        smxfe_publisher.publish(SMXFE_odom);
 
-        // 2. 构造并发布 TF 变换消息
-        geometry_msgs::msg::TransformStamped transformStamped;
-        transformStamped.header.stamp = fusion_msg.stamp;
-        transformStamped.header.frame_id = "odom";      // 父坐标系
-        transformStamped.child_frame_id = "base_link";   // 子坐标系
+        // Create and publish TF transform
+        tf::Transform transform;
+        transform.setOrigin(tf::Vector3(
+            fusion_msg.estimated_xyz[0],
+            fusion_msg.estimated_xyz[3],
+            fusion_msg.estimated_xyz[6]
+        ));
+        transform.setRotation(q);
+        
+        tf_broadcaster->sendTransform(tf::StampedTransform(
+            transform,
+            fusion_msg.stamp,
+            "odom",//"odom",
+            "base"
+        ));
 
-        // 设置位置
-        transformStamped.transform.translation.x = fusion_msg.estimated_xyz[0];
-        transformStamped.transform.translation.y = fusion_msg.estimated_xyz[3];
-        transformStamped.transform.translation.z = fusion_msg.estimated_xyz[6];
+        // Create IMU message
+        sensor_msgs::Imu imu_msg;
 
-        // 设置旋转（四元数）
-        transformStamped.transform.rotation = tf2::toMsg(q);
+        // Set message header
+        imu_msg.header.stamp = fusion_msg.stamp;
+        imu_msg.header.frame_id = "trunk"; // Set according to your robot frame
 
-        // 发布 TF 变换
-        TF_broadcaster->sendTransform(transformStamped);
+        // Set linear acceleration (accelerometer data)
+        imu_msg.linear_acceleration.x = low_state->imu.accelerometer[0];
+        imu_msg.linear_acceleration.y = low_state->imu.accelerometer[1];
+        imu_msg.linear_acceleration.z = low_state->imu.accelerometer[2];
 
+        // Set angular velocity (gyroscope data)
+        imu_msg.angular_velocity.x = low_state->imu.gyroscope[0];
+        imu_msg.angular_velocity.y = low_state->imu.gyroscope[1];
+        imu_msg.angular_velocity.z = low_state->imu.gyroscope[2];
 
-        // 创建 Imu 消息对象
-        sensor_msgs::msg::Imu imu_msg;
-
-        // 设置消息头
-        imu_msg.header.stamp = this->get_clock()->now();
-        imu_msg.header.frame_id = "imu_link"; // 根据您的机器人框架设置
-
-        // 设置线性加速度（加速度计数据）
-        imu_msg.linear_acceleration.x = low_state.imu_state().accelerometer()[0];
-        imu_msg.linear_acceleration.y = low_state.imu_state().accelerometer()[1];
-        imu_msg.linear_acceleration.z = low_state.imu_state().accelerometer()[2];
-
-        // 设置角速度（陀螺仪数据）
-        imu_msg.angular_velocity.x = low_state.imu_state().gyroscope()[0];
-        imu_msg.angular_velocity.y = low_state.imu_state().gyroscope()[1];
-        imu_msg.angular_velocity.z = low_state.imu_state().gyroscope()[2];
-
-        // 设置姿态（RPY 转换为四元数）
-        q.setRPY(
-            low_state.imu_state().rpy()[0],
-            low_state.imu_state().rpy()[1],
-            low_state.imu_state().rpy()[2]
+        // Set orientation (RPY to quaternion)
+        tf::Quaternion imu_q;
+        imu_q.setRPY(
+            low_state->imu.rpy[0],
+            low_state->imu.rpy[1],
+            low_state->imu.rpy[2]
         );
-        imu_msg.orientation = tf2::toMsg(q);
+        
+        // Convert to geometry_msgs::Quaternion
+        imu_msg.orientation.x = imu_q.x();
+        imu_msg.orientation.y = imu_q.y();
+        imu_msg.orientation.z = imu_q.z();
+        imu_msg.orientation.w = imu_q.w();
 
-        // 设置协方差矩阵（根据您的传感器精度设置）
-        // 如果不知道，可以设置为 -1 或默认值
+        // Set covariance matrices (according to sensor accuracy)
+        // If unknown, set to -1 or default values
         imu_msg.orientation_covariance[0] = -1;
         imu_msg.angular_velocity_covariance[0] = -1;
         imu_msg.linear_acceleration_covariance[0] = -1;
 
-        // 发布 IMU 消息
-        SMX_IMU_publisher->publish(imu_msg);
+        // Publish IMU message
+        smx_imu_publisher.publish(imu_msg);
+    }
+
+    void ResetCallback(const std_msgs::Bool::ConstPtr& msg)
+    {
+        if (msg->data)
+        {
+            ROS_WARN("Received reset request. Resetting estimator states...");
+
+            for (auto* model : StateSpaceModel1_Sensors)
+            {
+                for (int i = 0; i < 9; ++i)
+                    model->EstimatedState[i] = 0;
+
+                for (int i = 0; i < 72; ++i)
+                    model->Double_Par[i] = 0;
+
+            }
+            for(int i=0; i<4; i++)
+            {
+                Sensor_Legs->FootfallPositionRecordIsInitiated[i] = 0;
+            }
+            StateSpaceModel1_Sensors[0]->EstimatedState[0] = 0;
+            StateSpaceModel1_Sensors[0]->EstimatedState[3] = 0;
+            StateSpaceModel1_Sensors[0]->EstimatedState[6] = 0;
+
+            ROS_INFO("Estimator state has been reset.");
         }
+    }
+
 };
+
 
 void FusionEstimatorNode::ObtainParameter()
 {
-    // 获得机器狗运动学参数
-    Sensor_Legs->KinematicParams  << 
+    // Set default kinematic parameters for the quadruped
+    Sensor_Legs->KinematicParams << 
     0.1934,  0.0465,  0.000,   0.0,  0.0955,  0.0,   0.0,  0.0, -0.213,   0.0,  0.0, -0.213,  0.022,
     0.1934, -0.0465,  0.000,   0.0, -0.0955,  0.0,   0.0,  0.0, -0.213,   0.0,  0.0, -0.213,  0.022,
     -0.1934, -0.0465,  0.000,   0.0, -0.0955,  0.0,   0.0,  0.0, -0.213,   0.0,  0.0, -0.213,  0.022,
     -0.1934,  0.0465,  0.000,   0.0,  0.0955,  0.0,   0.0,  0.0, -0.213,   0.0,  0.0, -0.213,  0.022;
-    std::filesystem::path current_file(__FILE__);
-    std::filesystem::path package_dir = current_file.parent_path().parent_path();
-    std::filesystem::path urdf_path = package_dir / "cfg" / "go2_description.urdf";
-    std::ifstream urdf_file(urdf_path);
-    if (!urdf_file.is_open())
+    
+    // Get the robot description from the parameter server
+    ros::NodeHandle nh;
+    std::string robot_description;
+    if (!nh.getParam("robot_description", robot_description))
     {
-        std::cout << "无法打开文件: " << urdf_path << "，使用默认值。" << std::endl;
+        ROS_WARN("Failed to get robot_description from parameter server, using default values.");
         return;
     }
-    // 读入文件内容
-    std::string urdf_xml((std::istreambuf_iterator<char>(urdf_file)), std::istreambuf_iterator<char>());
-    urdf_file.close();
-    urdf::ModelInterfaceSharedPtr model = urdf::parseURDF(urdf_xml);
-    if (!model)
+    
+    // Parse the URDF
+    urdf::Model model;
+    if (!model.initString(robot_description))
     {
-        std::cout << "解析URDF失败: " << urdf_path << "，使用默认值。" << std::endl;
+        ROS_WARN("Failed to parse URDF from robot_description, using default values.");
         return;
     }
-    // 设置输出格式：固定小数点，保留四位小数
+    
+    // Set output format: fixed decimal point, 4 decimal places
     std::cout << std::fixed << std::setprecision(4);
-    // 定义腿名称顺序，与 KinematicParams 的行对应
+    
+    // Define the leg name order to match KinematicParams rows
     std::vector<std::string> legs = {"FL", "FR", "RL", "RR"};
-    // 定义关节映射结构，每个关节在 13 维向量中的起始列号（每个关节占 3 列）
+    
+    // Define joint mapping structure - each joint's starting column in the 13-dimensional vector
     struct JointMapping {
-        std::string suffix; // 关节后缀，如 "hip_joint"
-        int col;            // 起始列号
+        std::string suffix; // Joint suffix, e.g., "hip_joint"
+        int col;            // Starting column
     };
-    // 对每条腿，映射 hip, thigh, calf, foot_joint 对应的参数
+    
+    // Map hip, thigh, calf, foot_joint parameters for each leg
     std::vector<JointMapping> jointMappings = {
         { "hip_joint",   0 },
         { "thigh_joint", 3 },
         { "calf_joint",  6 },
         { "foot_joint",  9 }
     };
-    // 对每条腿更新各关节参数
+    
+    // Update parameters for each leg
     for (size_t i = 0; i < legs.size(); i++)
     {
         const std::string& leg = legs[i];
         for (const auto& jm : jointMappings)
         {
-            // 拼接完整关节名称，如 "FL_hip_joint"
+            // Construct full joint name, e.g., "FL_hip_joint"
             std::string jointName = leg + "_" + jm.suffix;
-            urdf::JointConstSharedPtr joint = model->getJoint(jointName);
+            std::shared_ptr<const urdf::Joint> joint = model.getJoint(jointName);
             if (!joint)
             {
-                std::cout << "未找到关节: " << jointName << " (" << leg << ")，使用默认值: ";
+                std::cout << "Joint not found: " << jointName << " (" << leg << "), using default value: ";
                 std::cout << Sensor_Legs->KinematicParams.row(i).segment(jm.col, 3) << std::endl;
             }
             else
@@ -364,48 +392,58 @@ void FusionEstimatorNode::ObtainParameter()
                 std::cout << Sensor_Legs->KinematicParams.row(i).segment(jm.col, 3) << std::endl;
             }
         }
-        // 更新该腿 foot 连杆 collision 的球半径（存储在列 12）
+        
+        // Update foot link collision sphere radius (stored in column 12)
         std::string footLinkName = leg + "_foot";
-        urdf::LinkConstSharedPtr footLink = model->getLink(footLinkName);
+        std::shared_ptr<const urdf::Link> footLink = model.getLink(footLinkName);
         if (!footLink)
         {
-            std::cout << "未找到连杆: " << footLinkName << " (" << leg << ")，使用默认值: " << Sensor_Legs->KinematicParams(i, 12) << std::endl;
+            std::cout << "Link not found: " << footLinkName << " (" << leg << "), using default value: " 
+                      << Sensor_Legs->KinematicParams(i, 12) << std::endl;
         }
-        else
+        else if (footLink->collision && footLink->collision->geometry &&
+                 footLink->collision->geometry->type == urdf::Geometry::SPHERE)
         {
-            if (footLink->collision && footLink->collision->geometry &&
-                footLink->collision->geometry->type == urdf::Geometry::SPHERE)
+            std::shared_ptr<urdf::Sphere> sphere = std::dynamic_pointer_cast<urdf::Sphere>(footLink->collision->geometry);
+            if (sphere)
             {
-                urdf::Sphere* sphere = dynamic_cast<urdf::Sphere*>(footLink->collision->geometry.get());
-                if (sphere)
-                {
-                    Sensor_Legs->KinematicParams(i, 12) = sphere->radius;
-                    std::cout << "Obtained KinematicPar for " << footLinkName << ": " << Sensor_Legs->KinematicParams(i, 12) << std::endl;
-                }
+                Sensor_Legs->KinematicParams(i, 12) = sphere->radius;
+                std::cout << "Obtained KinematicPar for " << footLinkName << ": " 
+                          << Sensor_Legs->KinematicParams(i, 12) << std::endl;
             }
         }
 
-        Sensor_Legs->Par_HipLength = std::sqrt(Sensor_Legs->KinematicParams(0, 3)*Sensor_Legs->KinematicParams(0, 3) + Sensor_Legs->KinematicParams(0, 4)*Sensor_Legs->KinematicParams(0, 4) + Sensor_Legs->KinematicParams(0, 5)*Sensor_Legs->KinematicParams(0, 5));
-        Sensor_Legs->Par_ThighLength = std::sqrt(Sensor_Legs->KinematicParams(0, 6)*Sensor_Legs->KinematicParams(0, 6) + Sensor_Legs->KinematicParams(0, 7)*Sensor_Legs->KinematicParams(0, 7) + Sensor_Legs->KinematicParams(0, 8)*Sensor_Legs->KinematicParams(0, 8));
-        Sensor_Legs->Par_CalfLength = std::sqrt(Sensor_Legs->KinematicParams(0, 9)*Sensor_Legs->KinematicParams(0, 9) + Sensor_Legs->KinematicParams(0, 10)*Sensor_Legs->KinematicParams(0, 10) + Sensor_Legs->KinematicParams(0, 11)*Sensor_Legs->KinematicParams(0, 11));
+        // Calculate lengths
+        Sensor_Legs->Par_HipLength = std::sqrt(Sensor_Legs->KinematicParams(0, 3)*Sensor_Legs->KinematicParams(0, 3) + 
+                                              Sensor_Legs->KinematicParams(0, 4)*Sensor_Legs->KinematicParams(0, 4) + 
+                                              Sensor_Legs->KinematicParams(0, 5)*Sensor_Legs->KinematicParams(0, 5));
+        Sensor_Legs->Par_ThighLength = std::sqrt(Sensor_Legs->KinematicParams(0, 6)*Sensor_Legs->KinematicParams(0, 6) + 
+                                                Sensor_Legs->KinematicParams(0, 7)*Sensor_Legs->KinematicParams(0, 7) + 
+                                                Sensor_Legs->KinematicParams(0, 8)*Sensor_Legs->KinematicParams(0, 8));
+        Sensor_Legs->Par_CalfLength = std::sqrt(Sensor_Legs->KinematicParams(0, 9)*Sensor_Legs->KinematicParams(0, 9) + 
+                                               Sensor_Legs->KinematicParams(0, 10)*Sensor_Legs->KinematicParams(0, 10) + 
+                                               Sensor_Legs->KinematicParams(0, 11)*Sensor_Legs->KinematicParams(0, 11));
         Sensor_Legs->Par_FootLength = abs(Sensor_Legs->KinematicParams(0, 12));
     }
 
-    // 获得IMU安装位置
+    // Get IMU installation position
     Eigen::Vector3d IMUPosition(-0.02557, 0, 0.04232);
     std::string jointName = "imu_joint";
-    urdf::JointConstSharedPtr joint = model->getJoint(jointName);
+    std::shared_ptr<const urdf::Joint> joint = model.getJoint(jointName);
     if (!joint)
     {
-        std::cout << "未找到关节: " << jointName << ", 使用默认值： ";
+        std::cout << "Joint not found: " << jointName << ", using default value: ";
         std::cout << IMUPosition.transpose() << std::endl;
     }
     else
     {
         urdf::Vector3 pos = joint->parent_to_joint_origin_transform.position;
+        IMUPosition = Eigen::Vector3d(pos.x, pos.y, pos.z);
         std::cout << "Obtained Position for " << jointName << ": ";
         std::cout << IMUPosition.transpose() << std::endl;
     }
+    
+    // Set sensor positions
     Sensor_IMUAcc->SensorPosition[0] = IMUPosition(0);
     Sensor_IMUAcc->SensorPosition[1] = IMUPosition(1);
     Sensor_IMUAcc->SensorPosition[2] = IMUPosition(2);
@@ -414,12 +452,12 @@ void FusionEstimatorNode::ObtainParameter()
     Sensor_IMUMagGyro->SensorPosition[2] = IMUPosition(2);
 }
 
+
 int main(int argc, char** argv)
 {
-    rclcpp::init(argc, argv);
-    auto node = std::make_shared<FusionEstimatorNode>();
-    node->ObtainParameter();
-    rclcpp::spin(node);
-    rclcpp::shutdown();
+    ros::init(argc, argv, "fusion_estimator_node");
+    FusionEstimatorNode node;
+    node.ObtainParameter();
+    node.spin();
     return 0;
 }

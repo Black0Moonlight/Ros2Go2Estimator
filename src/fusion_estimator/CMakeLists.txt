@@ -1,71 +1,75 @@
 cmake_minimum_required(VERSION 3.5)
 project(fusion_estimator)
 
-# 查找依赖
-find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(unitree_sdk2 REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
-find_package(builtin_interfaces REQUIRED)
-find_package(urdfdom_headers REQUIRED)
-find_package(urdfdom REQUIRED)
-find_package(nav_msgs REQUIRED)
-find_package(tf2 REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)  
+set(CMAKE_BUILD_TYPE Debug)
 
-# 生成消息接口
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/FusionEstimatorTest.msg"
-  DEPENDENCIES builtin_interfaces
+# 查找依赖
+find_package(catkin REQUIRED COMPONENTS
+  roscpp
+  std_msgs
+  nav_msgs
+  sensor_msgs
+  tf
+  message_generation
+  unitree_legged_msgs
+  urdf
 )
 
-# 获取 src/Estimator 目录下的所有 .cpp
+# 生成消息接口
+add_message_files(
+  FILES
+  FusionEstimatorTest.msg
+)
+
+# 生成服务接口（如果有）
+# add_service_files(
+#   FILES
+#   FusionEstimatorService.srv
+# )
+
+# 生成依赖的消息代码
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+)
+
+# 获取 src/Estimator 目录下的所有 .cpp 文件
 file(GLOB_RECURSE ESTIMATOR_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
 )
-
-# 获取C++类型支持目标
-rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # 创建可执行文件
 add_executable(fusion_estimator_node ${ESTIMATOR_SOURCES})
 
 # 包含目录
 target_include_directories(fusion_estimator_node PRIVATE
-  ${rclcpp_INCLUDE_DIRS}
-  ${sensor_msgs_INCLUDE_DIRS}
-  ${unitree_sdk2_INCLUDE_DIRS}
-  ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp
+  ${catkin_INCLUDE_DIRS}
   ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${urdfdom_headers_INCLUDE_DIRS}
-  ${urdfdom_INCLUDE_DIRS}
-)
-
-# 声明依赖
-ament_target_dependencies(fusion_estimator_node
-  rclcpp
-  sensor_msgs
-  nav_msgs
-  tf2
-  tf2_geometry_msgs
 )
 
 # 链接库
 target_link_libraries(fusion_estimator_node
-  ${ament_LIBRARIES}
-  unitree_sdk2
-  ddsc ddscxx
-  ${cpp_typesupport_target}
-  ${urdfdom_LIBRARIES}
+  ${catkin_LIBRARIES}
 )
 
 # 安装目标
 install(TARGETS fusion_estimator_node
-  DESTINATION lib/${PROJECT_NAME}
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
-# 导出依赖
-ament_export_dependencies(rosidl_default_runtime builtin_interfaces)
-ament_package()
+# 声明依赖
+catkin_package(
+  CATKIN_DEPENDS 
+  message_runtime 
+  roscpp 
+  std_msgs 
+  nav_msgs 
+  sensor_msgs 
+  tf
+  unitree_legged_msgs
+)
+
+

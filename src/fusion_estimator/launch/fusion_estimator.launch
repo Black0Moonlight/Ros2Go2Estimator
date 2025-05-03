@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Launch parameters -->
+  <arg name="user_debug" default="false"/>
+  
+  <!-- Launch the fusion estimator node -->
+  <node pkg="fusion_estimator" type="fusion_estimator_node" name="fusion_estimator_node" output="screen">
+    <!-- Optional calibration parameters -->
+    <param name="Modify_Par_1" value="0.0" /> <!-- Roll calibration in degrees -->
+    <param name="Modify_Par_2" value="0.0" /> <!-- Pitch calibration in degrees -->
+    <param name="Modify_Par_3" value="0.0" /> <!-- Yaw calibration in degrees -->
+  </node>
+</launch>

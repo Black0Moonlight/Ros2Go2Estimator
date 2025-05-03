@@ -1,0 +1,8 @@
+prefix=/home/blamlight/Github/Black0Moonlight/Ros2Go2Estimator/devel
+
+Name: fusion_estimator
+Description: Description of fusion_estimator
+Version: 0.0.0
+Cflags: -I/home/blamlight/Github/Black0Moonlight/Ros2Go2Estimator/devel/include
+Libs: -L${prefix}/lib 
+Requires: message_runtime roscpp std_msgs nav_msgs sensor_msgs tf unitree_legged_msgs

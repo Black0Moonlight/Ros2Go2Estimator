@@ -70,7 +70,6 @@ public:
     std::vector<EstimatorPortN*> StateSpaceModel2_Sensors = {}; // Container declaration
 
     void ObtainParameter();
-    // void UpdateSensorCalibration();
     void spin() {
         ros::spin();
     }
@@ -109,194 +108,19 @@ private:
         std::cout << "Sensor_IMUMagGyro->SensorQuaternion: " << Sensor_IMUMagGyro->SensorQuaternion.coeffs().transpose() << std::endl;
     }
 
-    void LowStateCallback(const unitree_legged_msgs::LowState::ConstPtr& low_state)
+    void LowStateCallback(const unitree_legged_msgs::LowState::ConstPtr& msg)
     {
-        // Create custom message object
-        fusion_estimator::FusionEstimatorTest fusion_msg;
-        
-        fusion_msg.stamp = ros::Time::now();
-
-        for(int i=0; i<3; i++){
-            fusion_msg.data_check_a[0+i] = low_state->imu.accelerometer[i];
-            fusion_msg.data_check_a[3+i] = low_state->imu.rpy[i];
-            fusion_msg.data_check_a[6+i] = low_state->imu.gyroscope[i];
-        }
-
-        for(int LegNumber = 0; LegNumber<4; LegNumber++)
-        {
-            for(int i = 0; i < 3; i++)
-            {
-                fusion_msg.data_check_b[LegNumber*3+i] = low_state->motorState[LegNumber*3+i].q;
-                fusion_msg.data_check_c[LegNumber*3+i] = low_state->motorState[LegNumber*3+i].dq;
-            }
-        }
-
-        // Start Estimation
-        double LatestMessage[3][100]={0};
-        static double LastMessage[3][100]={0};
-
-        ros::Time CurrentTime = ros::Time::now();
-        double CurrentTimestamp = CurrentTime.toSec();
-
-        for(int i = 0; i < 3; i++)
-        {
-            LatestMessage[0][3*i+2] = low_state->imu.accelerometer[i];
-        }
-        for(int i = 0; i < 9; i++)
-        {
-            if(LastMessage[0][i] != LatestMessage[0][i])
-            {
-                Sensor_IMUAcc->SensorDataHandle(LatestMessage[0], CurrentTimestamp);
-                for(int j = 0; j < 9; j++)
-                {
-                    LastMessage[0][j] = LatestMessage[0][j];
-                }
-                break;
-            }
-        }
-        for(int i=0; i<9; i++){
-            fusion_msg.estimated_xyz[i] = StateSpaceModel1_Sensors[0]->EstimatedState[i];
-        }
-
-        for(int i = 0; i < 3; i++)
-        {
-            LatestMessage[1][3*i] = low_state->imu.rpy[i];
-        }
-        for(int i = 0; i < 3; i++)
-        {
-            LatestMessage[1][3*i+1] = low_state->imu.gyroscope[i];
-        }
-        for(int i = 0; i < 9; i++)
-        {
-            if(LastMessage[1][i] != LatestMessage[1][i])
-            {
-                Sensor_IMUMagGyro->SensorDataHandle(LatestMessage[1], CurrentTimestamp);
-                for(int j = 0; j < 9; j++)
-                {
-                    LastMessage[1][j] = LatestMessage[1][j];
-                }
-                break;
-            }
-        }
-        for(int i=0; i<9; i++){
-            fusion_msg.estimated_rpy[i] = StateSpaceModel1_Sensors[1]->EstimatedState[i];
-        }
-
-        for(int LegNumber = 0; LegNumber<4; LegNumber++)
-        {
-            for(int i = 0; i < 3; i++)
-            {
-                LatestMessage[2][LegNumber*3+i] = low_state->motorState[LegNumber*3+i].q;
-                LatestMessage[2][12+ LegNumber*3+i] = low_state->motorState[LegNumber*3+i].dq;
-            }
-            LatestMessage[2][24 + LegNumber] = low_state->footForce[LegNumber];
-            fusion_msg.others[LegNumber] = low_state->footForce[LegNumber];
-            fusion_msg.others[LegNumber] = fusion_msg.others[LegNumber];
-        }
-        for(int i = 0; i < 28; i++)
-        {
-            if(LastMessage[2][i] != LatestMessage[2][i])
-            {
-                Sensor_Legs->SensorDataHandle(LatestMessage[2], CurrentTimestamp);
-                for(int j = 0; j < 28; j++)
-                {
-                    LastMessage[2][j] = LatestMessage[2][j];
-                }
-                break;
-            }
-        }
-        for(int i=0; i<4; i++){
-            for(int j=0; j<3; j++){
-                fusion_msg.data_check_d[3 * i + j] = StateSpaceModel1_Sensors[0]->Double_Par[6 * i + j];
-                fusion_msg.data_check_e[3 * i + j] = StateSpaceModel1_Sensors[0]->Double_Par[24 + 6 * i + j];
-                fusion_msg.feet_based_position[3 * i + j] = StateSpaceModel1_Sensors[0]->Double_Par[48 + 6 * i + j];
-                fusion_msg.feet_based_velocity[3 * i + j] = StateSpaceModel1_Sensors[0]->Double_Par[48 + 6 * i + j + 3];
-            }
-        }
-
-        fe_test_publisher.publish(fusion_msg);
-
-        // Create standard odometry message and publish
-        nav_msgs::Odometry SMXFE_odom;
-        SMXFE_odom.header.stamp = fusion_msg.stamp;
-        SMXFE_odom.header.frame_id = "base"; // "odom"
-        SMXFE_odom.child_frame_id = "trunk";  //"base_link"
-
-        // Use the first 3 elements of fusion_msg.estimated_xyz as position
-        SMXFE_odom.pose.pose.position.x = fusion_msg.estimated_xyz[0];
-        SMXFE_odom.pose.pose.position.y = fusion_msg.estimated_xyz[3];
-        SMXFE_odom.pose.pose.position.z = fusion_msg.estimated_xyz[6];
-
-        // Convert roll, pitch, yaw to quaternion
-        tf::Quaternion q;
-        q.setRPY(fusion_msg.estimated_rpy[0], fusion_msg.estimated_rpy[3], fusion_msg.estimated_rpy[6]);
-        
-        // Convert to geometry_msgs::Quaternion
-        SMXFE_odom.pose.pose.orientation.x = q.x();
-        SMXFE_odom.pose.pose.orientation.y = q.y();
-        SMXFE_odom.pose.pose.orientation.z = q.z();
-        SMXFE_odom.pose.pose.orientation.w = q.w();
-        
-        // Publish odometry message
-        smxfe_publisher.publish(SMXFE_odom);
-
-        // Create and publish TF transform
-        tf::Transform transform;
-        transform.setOrigin(tf::Vector3(
-            fusion_msg.estimated_xyz[0],
-            fusion_msg.estimated_xyz[3],
-            fusion_msg.estimated_xyz[6]
-        ));
-        transform.setRotation(q);
-        
-        tf_broadcaster->sendTransform(tf::StampedTransform(
-            transform,
-            fusion_msg.stamp,
-            "odom",//"odom",
-            "base"
-        ));
-
-        // Create IMU message
-        sensor_msgs::Imu imu_msg;
-
-        // Set message header
-        imu_msg.header.stamp = fusion_msg.stamp;
-        imu_msg.header.frame_id = "trunk"; // Set according to your robot frame
-
-        // Set linear acceleration (accelerometer data)
-        imu_msg.linear_acceleration.x = low_state->imu.accelerometer[0];
-        imu_msg.linear_acceleration.y = low_state->imu.accelerometer[1];
-        imu_msg.linear_acceleration.z = low_state->imu.accelerometer[2];
-
-        // Set angular velocity (gyroscope data)
-        imu_msg.angular_velocity.x = low_state->imu.gyroscope[0];
-        imu_msg.angular_velocity.y = low_state->imu.gyroscope[1];
-        imu_msg.angular_velocity.z = low_state->imu.gyroscope[2];
-
-        // Set orientation (RPY to quaternion)
-        tf::Quaternion imu_q;
-        imu_q.setRPY(
-            low_state->imu.rpy[0],
-            low_state->imu.rpy[1],
-            low_state->imu.rpy[2]
-        );
-        
-        // Convert to geometry_msgs::Quaternion
-        imu_msg.orientation.x = imu_q.x();
-        imu_msg.orientation.y = imu_q.y();
-        imu_msg.orientation.z = imu_q.z();
-        imu_msg.orientation.w = imu_q.w();
-
-        // Set covariance matrices (according to sensor accuracy)
-        // If unknown, set to -1 or default values
-        imu_msg.orientation_covariance[0] = -1;
-        imu_msg.angular_velocity_covariance[0] = -1;
-        imu_msg.linear_acceleration_covariance[0] = -1;
-
-        // Publish IMU message
-        smx_imu_publisher.publish(imu_msg);
+        std_msgs::Float32MultiArray converted_msg;
+        converted_msg.data.resize(37);
+        for (int i = 0; i < 3; ++i) converted_msg.data[i] = msg->imu.accelerometer[i];
+        for (int i = 0; i < 3; ++i) converted_msg.data[3+i] = msg->imu.rpy[i];
+        for (int i = 0; i < 3; ++i) converted_msg.data[6+i] = msg->imu.gyroscope[i];
+        for (int i = 0; i < 12; ++i) converted_msg.data[9+i] = msg->motorState[i].q;
+        for (int i = 0; i < 12; ++i) converted_msg.data[21+i] = msg->motorState[i].dq;
+        for (int i = 0; i < 4; ++i) converted_msg.data[33+i] = msg->footForce[i];
+        UdpStateCallback(boost::make_shared<std_msgs::Float32MultiArray>(converted_msg));
     }
-
+    
     void UdpStateCallback(const std_msgs::Float32MultiArray::ConstPtr& msg)
     {
         if (msg->data.size() != 37)
